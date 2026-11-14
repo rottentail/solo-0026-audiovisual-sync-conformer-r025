@@ -79,8 +79,11 @@ func InspectAudio(data []byte) (AudioClip, error) {
 	if format.audioFormat != 1 {
 		return AudioClip{}, fmt.Errorf("only integer PCM audio is accepted")
 	}
-	if format.channels != 1 && format.channels != 2 {
-		return AudioClip{}, fmt.Errorf("audio must have one or two channels")
+	if format.channels < 1 || int(format.channels) > domain.MaxAudioChannels {
+		return AudioClip{}, fmt.Errorf(
+			"audio must have between one and %d channels",
+			domain.MaxAudioChannels,
+		)
 	}
 	if format.bitsPerSample != 16 {
 		return AudioClip{}, fmt.Errorf("audio must use 16-bit samples")
@@ -156,7 +159,7 @@ func EncodePCM16(sampleRate, channels int, samples []int16) ([]byte, error) {
 	if sampleRate < 8000 || sampleRate > 192000 {
 		return nil, fmt.Errorf("unsupported sample rate")
 	}
-	if channels != 1 && channels != 2 {
+	if channels < 1 || channels > domain.MaxAudioChannels {
 		return nil, fmt.Errorf("unsupported channel count")
 	}
 	if len(samples)%channels != 0 {

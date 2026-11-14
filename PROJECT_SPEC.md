@@ -39,7 +39,14 @@ A `SyncAnalysis` belongs to one admitted take. It records:
 - the detected picture flash time in milliseconds;
 - the signed offset, where a positive value means audio is late;
 - a confidence value and a drift estimate in parts per million;
-- the threshold policy used for the decision.
+- the threshold policy used for the decision, including any designated
+  reference channel.
+
+For a multi-channel take, onset detection runs only against the requested
+reference channel (1-based). Louder material on the other channels cannot
+select the event when a reference channel is named. Omitting the reference
+channel preserves the legacy all-channel measurement. The reference channel
+only selects the analysis signal; it is never mixed into the output audio.
 
 An analysis is immutable after it reaches `ready` or `failed`. A `ready`
 analysis must have a finite offset and a positive event prominence. A failed
@@ -49,7 +56,10 @@ analysis stores one stable error code and never exposes a usable event pair.
 
 A `ConformJob` belongs to one ready analysis. It corrects the audio by the
 inverse of the measured offset while preserving picture frame order and Y4M
-geometry. The job commits a ZIP bundle containing:
+geometry. Every audio channel is shifted by the same number of frames, so a
+multi-channel recording retains all channels in their original order and
+inter-channel timing; no channel is downmixed, summed, or dropped. The job
+commits a ZIP bundle containing:
 
 - `audio-aligned.wav`;
 - `video-conformed.y4m`;
@@ -115,9 +125,11 @@ Entry point: `POST /v1/takes/{take_id}/sync-analyses`
 
 1. Load the admitted take and create a queued analysis.
 2. Decode both media payloads again at the analysis boundary.
-3. Detect a sharp audio onset and a picture luma flash.
-4. Compare event times against duration and confidence limits.
-5. Persist a ready or failed terminal record.
+3. When a reference channel is supplied, de-interleave that channel and run
+   onset detection on it alone; otherwise measure every channel together.
+4. Detect a sharp audio onset and a picture luma flash.
+5. Compare event times against duration and confidence limits.
+6. Persist a ready or failed terminal record.
 
 Success returns measured event times, signed offset, confidence, and drift.
 Failure records a stable code such as `sync_detection_failed`.
@@ -182,12 +194,17 @@ interfaces below:
 
 - WAV chunk bounds and Y4M frame-count agreement with declared geometry;
 - onset and flash detection on calibration media with known event times;
+- reference-channel onset selection on multi-channel calibration media where
+  the non-reference channels contain louder, earlier transients;
+- multi-channel conform output that preserves channel count, order, and
+  inter-channel timing;
 - positive and negative audio corrections around the measured offset;
 - terminal-state behavior for invalid and boundary requests;
 - atomic visibility of take directories and conform bundles.
 
-Until that stage, three bounded production workflow checks exercise the real
-HTTP routes, storage layout, media transforms, and persisted terminal records.
+Until that stage, bounded production workflow checks exercise the real
+HTTP routes, storage layout, media transforms, and persisted terminal records,
+including a multi-channel reference-channel workflow.
 They are not a substitute for the later test suite.
 
 ## Deferred testing boundary

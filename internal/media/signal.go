@@ -9,6 +9,18 @@ import (
 )
 
 func AnalyzeSync(audioData, videoData []byte) (domain.Measurement, error) {
+	return AnalyzeSyncWithReference(audioData, videoData, 0)
+}
+
+// AnalyzeSyncWithReference runs onset detection against one designated
+// reference channel. A referenceChannel of zero preserves the legacy behavior
+// of measuring every interleaved channel together. The reference channel only
+// selects which signal drives the event decision; it is never rendered into a
+// mix or written into the conformed audio.
+func AnalyzeSyncWithReference(
+	audioData, videoData []byte,
+	referenceChannel int,
+) (domain.Measurement, error) {
 	audio, err := InspectAudio(audioData)
 	if err != nil {
 		return domain.Measurement{}, fmt.Errorf("audio probe failed: %w", err)
@@ -17,7 +29,14 @@ func AnalyzeSync(audioData, videoData []byte) (domain.Measurement, error) {
 	if err != nil {
 		return domain.Measurement{}, fmt.Errorf("picture probe failed: %w", err)
 	}
-	audioEvent, audioProminence, err := detectAudioOnset(audio)
+	analysisClip := audio
+	if referenceChannel > 0 {
+		analysisClip, err = extractReferenceChannel(audio, referenceChannel)
+		if err != nil {
+			return domain.Measurement{}, err
+		}
+	}
+	audioEvent, audioProminence, err := detectAudioOnset(analysisClip)
 	if err != nil {
 		return domain.Measurement{}, err
 	}
@@ -174,4 +193,30 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// extractReferenceChannel de-interleaves one channel (1-based) into a
+// single-channel clip used only for onset detection. The source clip and its
+// channel order are never modified, so the conform stage can still realign and
+// re-emit every original channel unchanged.
+func extractReferenceChannel(clip AudioClip, referenceChannel int) (AudioClip, error) {
+	channels := clip.Info.Channels
+	if referenceChannel < 1 || referenceChannel > channels {
+		return AudioClip{}, fmt.Errorf(
+			"reference channel %d is outside the 1..%d channel range",
+			referenceChannel,
+			channels,
+		)
+	}
+	frameCount := clip.Info.FrameCount
+	samples := make([]int16, frameCount)
+	channelIndex := referenceChannel - 1
+	for frame := 0; frame < frameCount; frame++ {
+		samples[frame] = clip.Samples[frame*channels+channelIndex]
+	}
+	info := clip.Info
+	info.Channels = 1
+	info.PeakDBFS = 0
+	info.RMSDBFS = 0
+	return AudioClip{Info: info, Samples: samples}, nil
 }

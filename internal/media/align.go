@@ -22,15 +22,19 @@ func AlignAudio(audioData []byte, measuredOffsetMS int, maxCorrectionMS int) (do
 		)
 	}
 	frameDelta := int(math.Round(float64(measuredOffsetMS) * float64(clip.Info.SampleRate) / 1000))
-	sampleDelta := frameDelta * clip.Info.Channels
+	channels := clip.Info.Channels
+	sampleDelta := frameDelta * channels
 	output := make([]int16, len(clip.Samples))
+	// The same frame shift is applied to every interleaved channel, so the
+	// original channel order and inter-channel timing are preserved. No
+	// reference channel is mixed in and no channel is dropped or summed.
 	for outputIndex := range output {
 		sourceIndex := outputIndex + sampleDelta
 		if sourceIndex >= 0 && sourceIndex < len(clip.Samples) {
 			output[outputIndex] = clip.Samples[sourceIndex]
 		}
 	}
-	wav, err := EncodePCM16(clip.Info.SampleRate, clip.Info.Channels, output)
+	wav, err := EncodePCM16(clip.Info.SampleRate, channels, output)
 	if err != nil {
 		return domain.AlignedAudio{}, err
 	}

@@ -65,9 +65,9 @@ No environment variable is required.
 }
 ```
 
-The audio is signed 16-bit PCM WAV with one or two channels. The picture is a
-progressive planar C420 Y4M file. A repeating identical request is idempotent.
-Reusing a take identifier with different bytes or metadata returns
+The audio is signed 16-bit PCM WAV with one to eight channels. The picture is
+a progressive planar C420 Y4M file. A repeating identical request is
+idempotent. Reusing a take identifier with different bytes or metadata returns
 `take_conflict`.
 
 ### Read a take
@@ -85,7 +85,8 @@ and the admitted timestamp.
 {
   "analysis_id": "sync-check-a",
   "min_confidence": 0.55,
-  "max_offset_ms": 1000
+  "max_offset_ms": 1000,
+  "reference_channel": 1
 }
 ```
 
@@ -93,6 +94,14 @@ The response is a terminal analysis with audio and picture event times, a
 signed offset in milliseconds, confidence, and drift in parts per million.
 Positive offsets mean the detected audio event is later than the picture
 event.
+
+`reference_channel` is optional. When omitted (or zero), onset detection keeps
+the legacy behavior and measures every channel together. On a multi-channel
+field recording, set it to the 1-based channel that carries the slate clap:
+only that channel is analyzed, so louder dialogue on the other channels cannot
+determine the offset. A number above the admitted audio channel count returns
+`invalid_request`. The reference channel is an analysis selection only; it is
+never rendered into a mix and does not alter the stored media.
 
 ### Read an analysis
 
@@ -111,7 +120,11 @@ event.
 
 The audio is aligned earlier for a positive measured offset and later for a
 negative offset. The request fails with `correction_limit_exceeded` when the
-measured correction is larger than `max_correction_ms`.
+measured correction is larger than `max_correction_ms`. The same frame shift is
+applied to every interleaved channel, so a multi-channel recording keeps all
+of its original channels in their original order with their inter-channel
+timing intact; no channel is downmixed, summed, or dropped. The receipt records
+`audio_channels` and, when one was requested, `reference_channel`.
 
 ### Read a conform
 
@@ -168,12 +181,17 @@ Run one workflow at a time:
 go run ./cmd/syncflowcheck -workflow admit-take
 go run ./cmd/syncflowcheck -workflow analyze-sync
 go run ./cmd/syncflowcheck -workflow render-conform
+go run ./cmd/syncflowcheck -workflow multichannel-sync
 ```
 
 Each check starts the real loopback HTTP service, generates a bounded
 calibration pair through the production media package, completes the named
 workflow, and verifies persisted state or artifact bytes. The temporary data
-root is removed when the process exits.
+root is removed when the process exits. The `multichannel-sync` check admits a
+six-channel recording whose slate clap exists only on the first two channels,
+confirms that the reference-channel analysis ignores louder dialogue on the
+other channels, and verifies that the conformed WAV preserves every channel
+and its inter-channel timing.
 
 ## Media boundaries
 

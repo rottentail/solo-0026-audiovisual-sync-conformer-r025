@@ -83,12 +83,25 @@ func (s *Service) Analyze(takeID string, input domain.CreateAnalysisInput) (doma
 	if err != nil {
 		return domain.AnalysisResult{}, err
 	}
+	if input.ReferenceChannel > take.Audio.Channels {
+		return domain.AnalysisResult{}, domain.NewError(
+			"invalid_request",
+			400,
+			"reference_channel %d exceeds the %d channel(s) of the admitted audio",
+			input.ReferenceChannel,
+			take.Audio.Channels,
+		)
+	}
 	now := time.Now().UTC()
 	record := domain.SyncAnalysis{
-		ID:        input.AnalysisID,
-		TakeID:    take.ID,
-		State:     domain.AnalysisStateQueued,
-		Policy:    domain.SyncPolicy{MinConfidence: input.MinConfidence, MaxOffsetMS: input.MaxOffsetMS},
+		ID:     input.AnalysisID,
+		TakeID: take.ID,
+		State:  domain.AnalysisStateQueued,
+		Policy: domain.SyncPolicy{
+			MinConfidence:    input.MinConfidence,
+			MaxOffsetMS:      input.MaxOffsetMS,
+			ReferenceChannel: input.ReferenceChannel,
+		},
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -109,7 +122,11 @@ func (s *Service) Analyze(takeID string, input domain.CreateAnalysisInput) (doma
 	if err != nil {
 		return s.failAnalysis(record, "take_media_unavailable", err.Error())
 	}
-	measurement, err := media.AnalyzeSync(audio, video)
+	measurement, err := media.AnalyzeSyncWithReference(
+		audio,
+		video,
+		record.Policy.ReferenceChannel,
+	)
 	if err != nil {
 		return s.failAnalysis(record, "sync_detection_failed", err.Error())
 	}
@@ -255,6 +272,16 @@ func (s *Service) renderConform(record domain.ConformJob) (domain.ConformResult,
 	if err != nil {
 		return s.failConform(record, "take_media_unavailable", err.Error())
 	}
+	analysis, err := s.repository.GetAnalysis(record.AnalysisID)
+	if err != nil {
+		code := "take_media_unavailable"
+		message := err.Error()
+		if stable := domain.AsError(err); stable.Code == "analysis_not_found" {
+			code = "analysis_not_ready"
+			message = fmt.Sprintf("analysis %s is unavailable for conform rendering", record.AnalysisID)
+		}
+		return s.failConform(record, code, message)
+	}
 	record.AppliedOffsetMS = record.MeasuredOffsetMS
 	record.AppliedSamples = alignedAudio.AppliedSamples
 	record.AudioOutputDigest = alignedAudio.Digest
@@ -267,6 +294,8 @@ func (s *Service) renderConform(record domain.ConformJob) (domain.ConformResult,
 		MeasuredOffsetMS: record.MeasuredOffsetMS,
 		AppliedOffsetMS:  record.AppliedOffsetMS,
 		AppliedSamples:   record.AppliedSamples,
+		ReferenceChannel: analysis.Policy.ReferenceChannel,
+		AudioChannels:    take.Audio.Channels,
 		AudioDigest:      alignedAudio.Digest,
 		VideoDigest:      videoInfo.Digest,
 		InputTakeDigest:  take.Digest,

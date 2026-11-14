@@ -38,8 +38,9 @@ type MediaTake struct {
 }
 
 type SyncPolicy struct {
-	MinConfidence float64 `json:"min_confidence"`
-	MaxOffsetMS   int     `json:"max_offset_ms"`
+	MinConfidence    float64 `json:"min_confidence"`
+	MaxOffsetMS      int     `json:"max_offset_ms"`
+	ReferenceChannel int     `json:"reference_channel,omitempty"`
 }
 
 type SyncAnalysis struct {
@@ -87,6 +88,8 @@ type ConformReceipt struct {
 	MeasuredOffsetMS int       `json:"measured_offset_ms"`
 	AppliedOffsetMS  int       `json:"applied_offset_ms"`
 	AppliedSamples   int       `json:"applied_samples"`
+	ReferenceChannel int       `json:"reference_channel,omitempty"`
+	AudioChannels    int       `json:"audio_channels"`
 	AudioDigest      string    `json:"audio_digest"`
 	VideoDigest      string    `json:"video_digest"`
 	InputTakeDigest  string    `json:"input_take_digest"`
@@ -102,9 +105,10 @@ type CreateTakeInput struct {
 }
 
 type CreateAnalysisInput struct {
-	AnalysisID    string
-	MinConfidence float64
-	MaxOffsetMS   int
+	AnalysisID       string
+	MinConfidence    float64
+	MaxOffsetMS      int
+	ReferenceChannel int
 }
 
 type CreateConformInput struct {

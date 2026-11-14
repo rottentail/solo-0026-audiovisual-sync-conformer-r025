@@ -24,11 +24,13 @@ import (
 )
 
 type checkContext struct {
-	root   string
-	server *httptest.Server
-	client *http.Client
-	audio  []byte
-	video  []byte
+	root            string
+	server          *httptest.Server
+	client          *http.Client
+	audio           []byte
+	video           []byte
+	multichannel    []byte
+	multichannelVid []byte
 }
 
 func main() {
@@ -51,6 +53,8 @@ func main() {
 		err = runAnalyzeCheck(ctx)
 	case "render-conform":
 		err = runRenderCheck(ctx)
+	case "multichannel-sync":
+		err = runMultichannelCheck(ctx)
 	default:
 		err = fmt.Errorf("unknown workflow %q", *workflow)
 	}
@@ -75,14 +79,21 @@ func newCheckContext() (*checkContext, error) {
 		os.RemoveAll(root)
 		return nil, err
 	}
+	multichannel, multichannelVid, err := media.MultichannelCalibrationPair()
+	if err != nil {
+		os.RemoveAll(root)
+		return nil, err
+	}
 	api := httpapi.New(appservice.New(repository))
 	server := httptest.NewServer(api.Handler())
 	return &checkContext{
-		root:   root,
-		server: server,
-		client: &http.Client{Timeout: 20 * time.Second},
-		audio:  audio,
-		video:  video,
+		root:            root,
+		server:          server,
+		client:          &http.Client{Timeout: 20 * time.Second},
+		audio:           audio,
+		video:           video,
+		multichannel:    multichannel,
+		multichannelVid: multichannelVid,
 	}, nil
 }
 
@@ -314,6 +325,207 @@ func runRenderCheck(ctx *checkContext) error {
 	}
 	if response.StatusCode != http.StatusConflict {
 		return fmt.Errorf("failed correction exposed a bundle: %d %s", response.StatusCode, body)
+	}
+	return nil
+}
+
+// runMultichannelCheck exercises a multi-channel field recording where the
+// slate clap lives only on the first two channels and louder dialogue
+// transients on the other channels must not determine the sync offset.
+func runMultichannelCheck(ctx *checkContext) error {
+	const takeID = "multichannel-take-01"
+	response, body, err := ctx.requestJSON(
+		http.MethodPost,
+		"/v1/takes",
+		takePayload(takeID, "field recording", ctx.multichannel, ctx.multichannelVid),
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("multichannel admission returned %d: %s", response.StatusCode, body)
+	}
+	var admitted domain.MediaTake
+	if err := json.Unmarshal(body, &admitted); err != nil {
+		return fmt.Errorf("decode multichannel take: %w", err)
+	}
+	if admitted.Audio.Channels != media.MultichannelClapChannels {
+		return fmt.Errorf("admitted audio reports %d channels, want %d",
+			admitted.Audio.Channels, media.MultichannelClapChannels)
+	}
+
+	// A reference channel outside the admitted channel range is rejected
+	// before any analysis record is created.
+	response, body, err = ctx.requestJSON(
+		http.MethodPost,
+		"/v1/takes/"+takeID+"/sync-analyses",
+		map[string]any{
+			"analysis_id":       "mc-bad-channel",
+			"reference_channel": media.MultichannelClapChannels + 1,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusBadRequest {
+		return fmt.Errorf("out-of-range reference channel returned %d: %s", response.StatusCode, body)
+	}
+	if code := errorCode(body); code != "invalid_request" {
+		return fmt.Errorf("out-of-range reference channel returned code %q", code)
+	}
+	persisted, err := storage.New(ctx.root)
+	if err != nil {
+		return err
+	}
+	if _, err := persisted.GetAnalysis("mc-bad-channel"); err == nil {
+		return fmt.Errorf("rejected reference channel left a persisted analysis")
+	}
+
+	// The legacy request without a reference channel measures the loudest
+	// onset across every channel: the dialogue transient at 150 ms, not the
+	// slate clap at 500 ms.
+	response, body, err = ctx.requestJSON(
+		http.MethodPost,
+		"/v1/takes/"+takeID+"/sync-analyses",
+		map[string]any{
+			"analysis_id": "mc-legacy-all-channels",
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("legacy multichannel analysis returned %d: %s", response.StatusCode, body)
+	}
+	var legacy domain.SyncAnalysis
+	if err := json.Unmarshal(body, &legacy); err != nil {
+		return fmt.Errorf("decode legacy analysis: %w", err)
+	}
+	if legacy.State != domain.AnalysisStateReady || legacy.AudioEventMS == nil {
+		return fmt.Errorf("legacy multichannel analysis did not become ready: %s", legacy.ErrorMessage)
+	}
+	if *legacy.AudioEventMS == media.CalibrationAudioEvent {
+		return fmt.Errorf("legacy analysis unexpectedly selected the slate clap at %d ms",
+			media.CalibrationAudioEvent)
+	}
+
+	// Pinning the reference channel to channel 1 selects the slate clap even
+	// though the other channels contain louder dialogue.
+	response, body, err = ctx.requestJSON(
+		http.MethodPost,
+		"/v1/takes/"+takeID+"/sync-analyses",
+		map[string]any{
+			"analysis_id":       "mc-reference-clap",
+			"reference_channel": 1,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("reference-channel analysis returned %d: %s", response.StatusCode, body)
+	}
+	var reference domain.SyncAnalysis
+	if err := json.Unmarshal(body, &reference); err != nil {
+		return fmt.Errorf("decode reference analysis: %w", err)
+	}
+	if reference.State != domain.AnalysisStateReady {
+		return fmt.Errorf("reference analysis is %s: %s", reference.State, reference.ErrorMessage)
+	}
+	if reference.AudioEventMS == nil || *reference.AudioEventMS != media.CalibrationAudioEvent {
+		return fmt.Errorf("reference audio event is %v, want %d",
+			reference.AudioEventMS, media.CalibrationAudioEvent)
+	}
+	if reference.OffsetMS == nil || *reference.OffsetMS != 125 {
+		return fmt.Errorf("reference offset is %v, want 125", reference.OffsetMS)
+	}
+	if reference.Policy.ReferenceChannel != 1 {
+		return fmt.Errorf("persisted policy lost the reference channel: %+v", reference.Policy)
+	}
+
+	// The conformed bundle must retain every original channel in its original
+	// order; the analysis reference channel must not become a mono mixdown.
+	response, body, err = ctx.requestJSON(
+		http.MethodPost,
+		"/v1/sync-analyses/mc-reference-clap/conforms",
+		map[string]any{
+			"conform_id":        "mc-conform-01",
+			"max_correction_ms": 500,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("multichannel conform returned %d: %s", response.StatusCode, body)
+	}
+	response, bundle, err := ctx.requestJSON(
+		http.MethodGet,
+		"/v1/conforms/mc-conform-01/bundle",
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("multichannel bundle read returned %d: %s", response.StatusCode, bundle)
+	}
+	entries, err := readZip(bundle)
+	if err != nil {
+		return err
+	}
+	aligned, err := media.InspectAudio(entries["audio-aligned.wav"])
+	if err != nil {
+		return fmt.Errorf("probe aligned multichannel audio: %w", err)
+	}
+	if aligned.Info.Channels != media.MultichannelClapChannels {
+		return fmt.Errorf("aligned audio has %d channels, want %d",
+			aligned.Info.Channels, media.MultichannelClapChannels)
+	}
+	source, err := media.InspectAudio(ctx.multichannel)
+	if err != nil {
+		return fmt.Errorf("probe source multichannel audio: %w", err)
+	}
+	if len(aligned.Samples) != len(source.Samples) {
+		return fmt.Errorf("aligned sample count %d differs from source %d",
+			len(aligned.Samples), len(source.Samples))
+	}
+	channels := media.MultichannelClapChannels
+	var receipt domain.ConformReceipt
+	if err := json.Unmarshal(entries["conform-receipt.json"], &receipt); err != nil {
+		return fmt.Errorf("decode multichannel receipt: %w", err)
+	}
+	appliedFrames := receipt.AppliedSamples
+	if receipt.AudioChannels != channels || receipt.ReferenceChannel != 1 {
+		return fmt.Errorf("receipt does not record channels=%d and reference=1: %+v",
+			channels, receipt)
+	}
+	if err := verifyChannelRelations(source.Samples, aligned.Samples, channels, appliedFrames); err != nil {
+		return err
+	}
+	return nil
+}
+
+// verifyChannelRelations checks that the conform applied one uniform frame
+// shift to every channel: every non-silence output frame equals the source
+// frame at index+appliedFrames, with every channel sample matching in order.
+func verifyChannelRelations(source, aligned []int16, channels, appliedFrames int) error {
+	frameCount := len(source) / channels
+	for frame := 0; frame < frameCount; frame++ {
+		sourceFrame := frame + appliedFrames
+		if sourceFrame < 0 || sourceFrame >= frameCount {
+			continue
+		}
+		for channel := 0; channel < channels; channel++ {
+			got := aligned[frame*channels+channel]
+			want := source[sourceFrame*channels+channel]
+			if got != want {
+				return fmt.Errorf(
+					"channel %d frame %d was altered: got %d want %d",
+					channel+1, frame, got, want,
+				)
+			}
+		}
 	}
 	return nil
 }

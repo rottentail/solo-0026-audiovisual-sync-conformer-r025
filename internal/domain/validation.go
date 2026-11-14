@@ -12,6 +12,7 @@ const (
 	MaxVideoWidth          = 1920
 	MaxVideoHeight         = 1080
 	MaxVideoFrames         = 1200
+	MaxAudioChannels       = 8
 	MaxTakeNameRunes       = 120
 	MaxTakeNoteRunes       = 500
 	DefaultMinConf         = 0.55
@@ -52,6 +53,9 @@ func ValidateCreateAnalysis(input CreateAnalysisInput) error {
 	}
 	if input.MaxOffsetMS < 1 || input.MaxOffsetMS > 10000 {
 		return NewError("invalid_request", 400, "max_offset_ms must be between 1 and 10000")
+	}
+	if input.ReferenceChannel < 0 {
+		return NewError("invalid_request", 400, "reference_channel must be a positive channel number or zero")
 	}
 	return nil
 }

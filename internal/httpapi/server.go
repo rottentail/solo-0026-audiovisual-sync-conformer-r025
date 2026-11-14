@@ -24,9 +24,10 @@ type createTakeRequest struct {
 }
 
 type createAnalysisRequest struct {
-	AnalysisID    string   `json:"analysis_id"`
-	MinConfidence *float64 `json:"min_confidence"`
-	MaxOffsetMS   *int     `json:"max_offset_ms"`
+	AnalysisID       string   `json:"analysis_id"`
+	MinConfidence    *float64 `json:"min_confidence"`
+	MaxOffsetMS      *int     `json:"max_offset_ms"`
+	ReferenceChannel *int     `json:"reference_channel"`
 }
 
 type createConformRequest struct {
@@ -102,10 +103,15 @@ func (api *API) createAnalysis(w http.ResponseWriter, request *http.Request) {
 	if payload.MaxOffsetMS != nil {
 		maxOffsetMS = *payload.MaxOffsetMS
 	}
+	referenceChannel := 0
+	if payload.ReferenceChannel != nil {
+		referenceChannel = *payload.ReferenceChannel
+	}
 	result, err := api.service.Analyze(request.PathValue("take_id"), domain.CreateAnalysisInput{
-		AnalysisID:    payload.AnalysisID,
-		MinConfidence: minConfidence,
-		MaxOffsetMS:   maxOffsetMS,
+		AnalysisID:       payload.AnalysisID,
+		MinConfidence:    minConfidence,
+		MaxOffsetMS:      maxOffsetMS,
+		ReferenceChannel: referenceChannel,
 	})
 	if err != nil {
 		writeFailure(w, err)
